@@ -11,7 +11,9 @@ def select_polygon(event, x, y, flags, param):
     global points, img_display
     if event == cv2.EVENT_LBUTTONDOWN: # clic gauche
         points.append((x, y))
-        cv2.circle(img_display, (x, y), 3, (0, 0, 255), -1)
+        if len(points) > 1:
+            cv2.line(img_display, points[-2], points[-1], (0, 255, 0), 2)
+        cv2.circle(img_display, (x, y), 1, (255, 0, 0), -1)
 
 def overlay_mask(img, mask):
     """Affiche la zone à inpaint (mask=255)"""
@@ -28,7 +30,7 @@ def resize_for_display(img, target_width=1000):
     return img
 
 # Charger l'image
-img = cv2.imread("img/baule.jpg")
+img = cv2.imread("img/inpainting.png")
 img_display = img.copy()
 cv2.namedWindow("Selection")
 cv2.setMouseCallback("Selection", select_polygon)
@@ -73,7 +75,9 @@ def get_next_point(mask):
     if len(border_points[0]) > 0:
         idx = np.random.randint(0, len(border_points[0]))
         y, x = border_points[0][idx], border_points[1][idx]
-    return y, x
+        return y, x
+    else:
+        return None, None
 
 def compute_priority(img_gray, mask, C, patch_radius=PATCH_RADIUS, alpha=255.0):
     Ix, Iy = compute_gradients(img_gray)
@@ -146,17 +150,25 @@ iteration = 0
 while np.any(mask == 255):
     iteration += 1
     gray = cv2.cvtColor(img_inpaint, cv2.COLOR_BGR2GRAY)
-    # priorities = compute_priority(gray, mask, C)
-    # y, x = np.unravel_index(np.argmax(priorities), priorities.shape)
+    priorities = compute_priority(gray, mask, C)
+    # vérifier si les priorités sont toutes nulles
+    if np.all(priorities == 0):
+        print("Passage en monde oignon")
+        
+        y, x = get_next_point(mask)
+    else:
+        y, x = np.unravel_index(np.argmax(priorities), priorities.shape)
 
-    y, x = get_next_point(mask)
+    if y is None:  # fin de l'algo
+        break
 
     try:
         yy, xx = find_best_patch(img_inpaint, mask, (y, x))
     except Exception as e:
-        print("Aucun patch trouvé\n", e)
+        print("Aucun patch trouvé: ", e)
         error_count += 1
         mask[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = 0
+        
         # Affiche en rouge le patch qui a posé problème
         img_inpaint[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = [0, 0, 255]
         C[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = C[y, x]
@@ -179,12 +191,12 @@ while np.any(mask == 255):
     # Update affichage
     vis = overlay_mask(img_inpaint, mask)
     display_vis = resize_for_display(vis)
-    cv2.imshow("Inpainting progress", display_vis)
+    cv2.imshow("Algo en cours", display_vis)
     cv2.waitKey(30)
 
 display_result = resize_for_display(img_inpaint)
 print(error_count)
-cv2.imshow("Résultat final", display_result)
+cv2.imshow("Resultat final", display_result)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
 
