@@ -72,7 +72,7 @@ def compute_normals(mask):
 
 def get_next_point(mask):
     """Retourne un point aléatoire sur le bord de oméga"""
-    border = cv2.Canny(mask, 100, 200)
+    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
     border_points = np.where(border > 0)
     if len(border_points[0]) > 0:
         idx = np.random.randint(0, len(border_points[0]))
@@ -88,7 +88,7 @@ def compute_priority(img_gray, mask, C, patch_radius=PATCH_RADIUS, alpha=255.0):
     N = compute_normals(mask)
 
     priorities = np.zeros_like(img_gray, dtype=np.float32)
-    border = cv2.Canny(mask, 100, 200)
+    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
 
     h, w = img_gray.shape
     for y in range(h):
