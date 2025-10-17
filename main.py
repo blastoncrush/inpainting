@@ -54,13 +54,49 @@ if len(points) > 2:
     cv2.fillPoly(mask, [np.array(points)], 255)
 
 # Fonctions mathématiques
-def compute_gradients(gray):
-    Ix = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    Iy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    return Ix, Iy
+def compute_isophote(gray, mask):
+    """Calcule l'isophote uniquement sur la bordure en ne considérant que les pixels connus"""
+    h, w = gray.shape
+    isophote = np.zeros((h, w, 2), dtype=np.float64)
+    
+    # Bordure de la zone à inpainter
+    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+    
+    for y in range(1, h-1):  # Eviter les bords de l'image
+        for x in range(1, w-1):
+            if border[y, x] > 0:  # Seulement sur la bordure
+                # Calculer le gradient en ne considérant que les pixels connus
+                # Masque des voisins connus (3x3 autour du pixel)
+                neighbors_mask = mask[y-1:y+2, x-1:x+2] == 0  # 0 = pixel connu
+                neighbors_gray = gray[y-1:y+2, x-1:x+2]
 
-def compute_isophote(Ix, Iy):
-    return np.dstack((-Iy, Ix))
+                cond = (neighbors_mask[1, 0] or neighbors_mask[1, 2]) and (neighbors_mask[0, 1] or neighbors_mask[2, 1])
+                # Si on a assez de pixels connus pour calculer un gradient
+                if cond:
+                    # Gradient en x (approximation avec les pixels disponibles)
+                    if neighbors_mask[1, 0] and neighbors_mask[1, 2]:  # gauche et droite connus
+                        Ix = (neighbors_gray[1, 2] - neighbors_gray[1, 0]) / 2.0
+                    elif neighbors_mask[1, 2]:  # seulement droite connu
+                        Ix = neighbors_gray[1, 2] - neighbors_gray[1, 1]
+                    elif neighbors_mask[1, 0]:  # seulement gauche connu
+                        Ix = neighbors_gray[1, 1] - neighbors_gray[1, 0]
+                    else:
+                        Ix = 0
+                    
+                    # Gradient en y (approximation avec les pixels disponibles)
+                    if neighbors_mask[0, 1] and neighbors_mask[2, 1]:  # haut et bas connus
+                        Iy = (neighbors_gray[2, 1] - neighbors_gray[0, 1]) / 2.0
+                    elif neighbors_mask[2, 1]:  # seulement bas connu
+                        Iy = neighbors_gray[2, 1] - neighbors_gray[1, 1]
+                    elif neighbors_mask[0, 1]:  # seulement haut connu
+                        Iy = neighbors_gray[1, 1] - neighbors_gray[0, 1]
+                    else:
+                        Iy = 0
+                    
+                    # Isophote = perpendiculaire au gradient
+                    isophote[y, x] = [-Iy, Ix]
+    
+    return isophote
 
 def compute_normals(mask):
     mask_float = mask.astype(np.float32)/255.0
@@ -83,8 +119,7 @@ def get_next_point(mask):
 
 def compute_priority(img_gray, mask, C, patch_radius=PATCH_RADIUS, alpha=255.0):
     """Applique l'algo pour calculer les priorités"""
-    Ix, Iy = compute_gradients(img_gray)
-    isophote = compute_isophote(Ix, Iy)
+    isophote = compute_isophote(img_gray, mask)
     N = compute_normals(mask)
 
     priorities = np.zeros_like(img_gray, dtype=np.float32)
@@ -101,6 +136,7 @@ def compute_priority(img_gray, mask, C, patch_radius=PATCH_RADIUS, alpha=255.0):
                 patch_conf = C[y1:y2, x1:x2]
                 C_p = np.mean(patch_conf)
 
+                # L'isophote est maintenant calculé seulement avec les pixels connus
                 D_p = abs(np.dot(isophote[y, x], N[y, x])) / alpha
 
                 priorities[y, x] = C_p * D_p
@@ -217,4 +253,3 @@ display_result = resize_for_display(img)
 cv2.imshow("Resultat final", display_result)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
-
