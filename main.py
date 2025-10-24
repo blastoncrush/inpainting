@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-PATCH_RADIUS = 3
+PATCH_RADIUS = 4
 
 # Sélection de la zone à inpaint
 drawing = False
@@ -32,7 +32,7 @@ def resize_for_display(img, target_width=1000):
     return img
 
 # Sélection de la zone à inpaint
-img = cv2.imread("img/fontaine.jpg")
+img = cv2.imread("img/temp.png")
 img_display = img.copy()
 cv2.namedWindow("Selection")
 cv2.setMouseCallback("Selection", select_polygon)
@@ -251,5 +251,9 @@ while np.any(mask == 255):
 
 display_result = resize_for_display(img)
 cv2.imshow("Resultat final", display_result)
+
+out_path = "img/temp.png"
+cv2.imwrite(out_path, img)
+
 cv2.waitKey(0)
 cv2.destroyAllWindows()
