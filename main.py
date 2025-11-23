@@ -1,102 +1,40 @@
 import cv2
 import numpy as np
 
-PATCH_RADIUS = 4
-
-# Sélection de la zone à inpaint
-drawing = False
-points = []
-
-def select_polygon(event, x, y, flags, param):
-    """Callback pour dessiner le polygone de sélection"""
-    global points, img_display
-    if event == cv2.EVENT_LBUTTONDOWN: # clic gauche
-        points.append((x, y))
-        if len(points) > 1:
-            cv2.line(img_display, points[-2], points[-1], (0, 255, 0), 2)
-        cv2.circle(img_display, (x, y), 1, (255, 0, 0), -1)
+PATCH_RADIUS = 3
+COURONNE = 4
 
 def overlay_mask(img, mask):
-    """Affiche la zone à inpaint (mask=255)"""
+    """
+    Affiche le masque en rouge sur l'image
+    """
     overlay = img.copy()
-    overlay[mask == 255] = (0, 0, 255)  # rouge pur
+    overlay[mask == 255] = (0, 0, 255)
     return cv2.addWeighted(img, 0.7, overlay, 0.3, 0)
 
 def resize_for_display(img, target_width=1000):
-    """Redimensionne l'image pour l'affichage (car les images sont petites car basse résolution)"""
+    """
+    Redimensionne l'image pour l'affichage
+    """
     h, w = img.shape[:2]
-    if w != target_width:
+    if w > target_width:
         aspect_ratio = h / w
         target_height = int(target_width * aspect_ratio)
         return cv2.resize(img, (target_width, target_height))
+    if w <= target_width:
+        new_width = max(w, target_width)
+        aspect_ratio = h / w
+        target_height = int(new_width * aspect_ratio)
+        return cv2.resize(img, (new_width, target_height))
     return img
 
-# Sélection de la zone à inpaint
-img = cv2.imread("img/temp.png")
-img_display = img.copy()
-cv2.namedWindow("Selection")
-cv2.setMouseCallback("Selection", select_polygon)
+def compute_gradients(gray):
+    Ix = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    Iy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    return Ix, Iy
 
-while True:
-    cv2.imshow("Selection", img_display)
-    key = cv2.waitKey(1) & 0xFF
-    if key == 13:  # Entrée = valider
-        break
-    elif key == 27:  # Échap = reset
-        points = []
-        img_display = img.copy()
-
-cv2.destroyAllWindows()
-
-# Créer un masque de la zone à inpaint
-mask = np.zeros(img.shape[:2], dtype=np.uint8)
-if len(points) > 2:
-    cv2.fillPoly(mask, [np.array(points)], 255)
-
-# Fonctions mathématiques
-def compute_isophote(gray, mask):
-    """Calcule l'isophote uniquement sur la bordure en ne considérant que les pixels connus"""
-    h, w = gray.shape
-    isophote = np.zeros((h, w, 2), dtype=np.float64)
-    
-    # Bordure de la zone à inpainter
-    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
-    
-    for y in range(1, h-1):  # Eviter les bords de l'image
-        for x in range(1, w-1):
-            if border[y, x] > 0:  # Seulement sur la bordure
-                # Calculer le gradient en ne considérant que les pixels connus
-                # Masque des voisins connus (3x3 autour du pixel)
-                neighbors_mask = mask[y-1:y+2, x-1:x+2] == 0  # 0 = pixel connu
-                neighbors_gray = gray[y-1:y+2, x-1:x+2]
-
-                cond = (neighbors_mask[1, 0] or neighbors_mask[1, 2]) and (neighbors_mask[0, 1] or neighbors_mask[2, 1])
-                # Si on a assez de pixels connus pour calculer un gradient
-                if cond:
-                    # Gradient en x (approximation avec les pixels disponibles)
-                    if neighbors_mask[1, 0] and neighbors_mask[1, 2]:  # gauche et droite connus
-                        Ix = (neighbors_gray[1, 2] - neighbors_gray[1, 0]) / 2.0
-                    elif neighbors_mask[1, 2]:  # seulement droite connu
-                        Ix = neighbors_gray[1, 2] - neighbors_gray[1, 1]
-                    elif neighbors_mask[1, 0]:  # seulement gauche connu
-                        Ix = neighbors_gray[1, 1] - neighbors_gray[1, 0]
-                    else:
-                        Ix = 0
-                    
-                    # Gradient en y (approximation avec les pixels disponibles)
-                    if neighbors_mask[0, 1] and neighbors_mask[2, 1]:  # haut et bas connus
-                        Iy = (neighbors_gray[2, 1] - neighbors_gray[0, 1]) / 2.0
-                    elif neighbors_mask[2, 1]:  # seulement bas connu
-                        Iy = neighbors_gray[2, 1] - neighbors_gray[1, 1]
-                    elif neighbors_mask[0, 1]:  # seulement haut connu
-                        Iy = neighbors_gray[1, 1] - neighbors_gray[0, 1]
-                    else:
-                        Iy = 0
-                    
-                    # Isophote = perpendiculaire au gradient
-                    isophote[y, x] = [-Iy, Ix]
-    
-    return isophote
+def compute_isophote(Ix, Iy):
+    return np.dstack((-Iy, Ix))
 
 def compute_normals(mask):
     mask_float = mask.astype(np.float32)/255.0
@@ -107,153 +45,260 @@ def compute_normals(mask):
     return N / norm
 
 def get_next_point(mask):
-    """Retourne un point aléatoire sur le bord de oméga"""
-    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+    # Fonction par défaut si compute_priority ne donne rien
+    border = cv2.Canny(mask, 100, 200)
     border_points = np.where(border > 0)
     if len(border_points[0]) > 0:
         idx = np.random.randint(0, len(border_points[0]))
         y, x = border_points[0][idx], border_points[1][idx]
         return y, x
-    else:
-        return None, None
+    return None, None
 
 def compute_priority(img_gray, mask, C, patch_radius=PATCH_RADIUS, alpha=255.0):
-    """Applique l'algo pour calculer les priorités"""
-    isophote = compute_isophote(img_gray, mask)
+
+    Ix, Iy = compute_gradients(img_gray)
+    isophote = compute_isophote(Ix, Iy)
     N = compute_normals(mask)
 
     priorities = np.zeros_like(img_gray, dtype=np.float32)
-    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
 
+    # Calcul de la bordure
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    border = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, kernel)
+    border_points = np.where(border > 0)
     h, w = img_gray.shape
-    for y in range(h):
-        for x in range(w):
-            if border[y, x] > 0:
-                # limites du patch (on fait attention aux bords...)
-                x1, x2 = max(0, x-patch_radius), min(w, x+patch_radius+1)
-                y1, y2 = max(0, y-patch_radius), min(h, y+patch_radius+1)
+    r = patch_radius
 
-                patch_conf = C[y1:y2, x1:x2]
-                C_p = np.mean(patch_conf)
+    for y, x in zip(*border_points):
 
-                # L'isophote est maintenant calculé seulement avec les pixels connus
-                D_p = abs(np.dot(isophote[y, x], N[y, x])) / alpha
+        # Calcul de C
+        x1, x2 = max(0, x - r), min(w, x + r + 1)
+        y1, y2 = max(0, y - r), min(h, y + r + 1)
+        patch_conf = C[y1:y2, x1:x2]
 
-                priorities[y, x] = C_p * D_p
+        # Empêcher les priorités fantômes : si presque aucun pixel n'est connu -> priorité = 0
+        if np.sum(patch_conf > 0) < 4:
+            continue
+
+        C_p = np.mean(patch_conf)
+
+        # Calcul de D
+
+        # Utiliser la valeur normalisée du gradient pour le calcul D_raw
+        D_raw = np.dot(isophote[y, x], N[y, x])
+        if np.isnan(D_raw):
+            continue
+
+        D_p = abs(D_raw) / alpha # Alpha = 255.0 est la borne max du gradient
+
+        # Calcul de P(p) = C(p) * D(p)
+        priorities[y, x] = C_p * D_p
 
     return priorities
 
-def find_best_patch(img, mask, target_patch, patch_radius=PATCH_RADIUS):
-    """Calcule le patch source le plus proche du patch cible"""
-    h, w = img.shape[:2]
+
+def find_best_patch(img_inpaint_lab, mask, C, target_patch, patch_radius=PATCH_RADIUS, C_threshold=0.9, w_L=2.0):
+
+    h, w = img_inpaint_lab.shape[:2]
     y, x = target_patch
-    t_y1, t_y2 = max(0, y-patch_radius), min(h, y+patch_radius+1)
-    t_x1, t_x2 = max(0, x-patch_radius), min(w, x+patch_radius+1)
+    r = patch_radius + COURONNE
     
-    # Adapte à la taille du patch si on est proche des bords
-    patch_h1, patch_h2 = y - t_y1, t_y2 - y - 1
-    patch_w1, patch_w2 = x - t_x1, t_x2 - x - 1
+    t_y1 = max(0, y-r); t_y2 = min(h, y+r+1)
+    t_x1 = max(0, x-r); t_x2 = min(w, x+r+1)
+    t_h = t_y2 - t_y1; t_w = t_x2 - t_x1
+
+    # Patch CIELab
+    tgt_patch_lab = img_inpaint_lab[t_y1:t_y2, t_x1:t_x2].astype(np.float32)
+    tgt_mask = mask[t_y1:t_y2, t_x1:t_x2]
+    
+    valid = (tgt_mask == 0)
+    n_valid = np.sum(valid)
+    if n_valid == 0:
+        return None
 
     best_patch = None
     best_dist = float("inf")
 
-    for yy in range(patch_h1, h-patch_h2):
-        for xx in range(patch_w1, w-patch_w2):
-            # pas de problème de bords ici
-            s_y1, s_y2 = yy-patch_h1, yy+patch_h2+1
-            s_x1, s_x2 = xx-patch_w1, xx+patch_w2+1
+    y_min, y_max = r, h - r - 1
+    x_min, x_max = r, w - r - 1
 
-            # Vérifier que tout le patch source est en dehors de la zone à inpaint
-            src_mask = mask[s_y1:s_y2, s_x1:s_x2]
-            if np.any(src_mask != 0):  # Si une partie du patch source est à inpainter
+    for yy in range(y_min, y_max + 1):
+        for xx in range(x_min, x_max + 1):
+
+            if mask[yy, xx] != 0:
                 continue
 
-            src_patch = img[s_y1:s_y2, s_x1:s_x2]
-            tgt_patch = img[t_y1:t_y2, t_x1:t_x2]
-            tgt_mask = mask[t_y1:t_y2, t_x1:t_x2]
+            s_y1 = yy - t_h//2; s_y2 = yy + (t_h - t_h//2)
+            s_x1 = xx - t_w//2; s_x2 = xx + (t_w - t_w//2)
 
-            valid = (tgt_mask == 0)
-            if np.sum(valid) == 0:
+            src_conf_patch = C[s_y1:s_y2, s_x1:s_x2]
+
+            if np.min(src_conf_patch) < C_threshold: # Seuil de confiance sur le patch source
                 continue
 
-            diff = (src_patch[valid] - tgt_patch[valid])**2
-            dist = np.sum(diff)
+            src_patch_lab = img_inpaint_lab[s_y1:s_y2, s_x1:s_x2].astype(np.float32)
+
+            if src_patch_lab.shape != tgt_patch_lab.shape:
+                continue
+
+            src_valid = src_patch_lab[valid]
+            tgt_valid = tgt_patch_lab[valid]
+            
+            # Calcul de la distance de texture pondérée
+            diff_L = (src_valid[:, 0] - tgt_valid[:, 0])**2 * w_L
+            diff_a = (src_valid[:, 1] - tgt_valid[:, 1])**2
+            diff_b = (src_valid[:, 2] - tgt_valid[:, 2])**2
+
+            total_diff = diff_L + diff_a + diff_b
+            
+            if n_valid == 0:
+                continue
+            
+            # MSD sur 3 canaux (normalisation par n_valid * 3)
+            dist = np.sum(total_diff) / (n_valid * 3)
 
             if dist < best_dist:
                 best_dist = dist
                 best_patch = (yy, xx)
 
-    return best_patch, (patch_h1, patch_h2), (patch_w1, patch_w2)
+    return best_patch
 
-# Boucle d’inpainting
+def run_inpainting(img, mask, C):
 
-# Masque de confiance
-C = np.ones_like(mask, dtype=np.float32)
-C[mask == 255] = 0.0
+    img_inpaint = img.copy()
+    r = PATCH_RADIUS
 
-iteration = 0
-while np.any(mask == 255):
-    iteration += 1
-    # Conversion en CIELAB
-    img_inpaint = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    
-    # ==== Etape 1: Calcul des priorités ====
-    gray = cv2.cvtColor(img_inpaint, cv2.COLOR_BGR2GRAY)
-    priorities = compute_priority(gray, mask, C)
-    
-    # vérifier si les priorités sont toutes nulles
-    if np.all(priorities == 0):
-        # Passage en mode oignon (choix aléatoire)
-        y, x = get_next_point(mask)
-    else:
-        y, x = np.unravel_index(np.argmax(priorities), priorities.shape)
+    # Conversion CIELAB
+    img_inpaint_lab = cv2.cvtColor(img_inpaint, cv2.COLOR_BGR2LAB)
+    h, w = img_inpaint_lab.shape[:2]
 
-    if y is None:  # fin de l'algo
-        img = cv2.cvtColor(img_inpaint, cv2.COLOR_LAB2BGR)
-        break
+    cv2.namedWindow("Inpainting en cours", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Inpainting en cours", 800, 600)
 
-    # ==== Etape 2: Trouver le meilleur patch ====
-    (yy, xx), (patch_h1, patch_h2), (patch_w1, patch_w2) = find_best_patch(img_inpaint, mask, (y, x))
-    t_y1, t_y2 = y-patch_h1, y+patch_h2+1
-    t_x1, t_x2 = x-patch_w1, x+patch_w2+1
-    tgt_mask = mask[t_y1:t_y2, t_x1:t_x2]
+    while np.any(mask == 255):
+        
+        # Calcul des priorités
+        gray = cv2.cvtColor(img_inpaint, cv2.COLOR_BGR2GRAY)
+        priorities = compute_priority(gray, mask, C)
 
-    s_y1, s_y2 = yy-patch_h1, yy+patch_h2+1
-    s_x1, s_x2 = xx-patch_w1, xx+patch_w2+1
-    src_patch = img_inpaint[s_y1:s_y2, s_x1:s_x2]
-    
-    # ==== Etape 3: Copier le patch et mettre à jour les infos ====
-    img_inpaint[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = src_patch[tgt_mask == 255]
-    mask[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = 0
-    C[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = C[y, x]
+        if np.max(priorities) > 0:
+            y, x = np.unravel_index(np.argmax(priorities), priorities.shape)
+        else:
+            y, x = get_next_point(mask)
+        if y is None:
+            break
+        
+        # Calcul de confiance pour la mise à jour
+        y1, y2 = max(0, y - r), min(C.shape[0], y + r + 1)
+        x1, x2 = max(0, x - r), min(C.shape[1], x + r + 1)
+        C_p_value = np.mean(C[y1:y2, x1:x2])
 
-    # Update affichage
-    display_vis = img_inpaint.copy()
-    display_vis = cv2.cvtColor(display_vis, cv2.COLOR_LAB2BGR)
-    
-    # Affiche le patch copié en vert
-    patch_mask = np.zeros_like(mask)
-    s_y1, s_y2 = yy-PATCH_RADIUS, yy+PATCH_RADIUS+1
-    s_x1, s_x2 = xx-PATCH_RADIUS, xx+PATCH_RADIUS+1
-    patch_mask[s_y1:s_y2, s_x1:s_x2] = 255
-    display_vis[patch_mask == 255] = [0, 255, 0]
-    
-    # Affiche la zone à inpaint en rouge
-    display_vis[mask == 255] = [0, 0, 255]
-    
-    img_bgr = cv2.cvtColor(img_inpaint, cv2.COLOR_LAB2BGR)
-    img = img_bgr.copy()
-    
-    display_vis = resize_for_display(cv2.addWeighted(img_bgr, 0.7, display_vis, 0.3, 0))
-    cv2.imshow("Algo en cours", display_vis)
-    cv2.waitKey(30)
+        # Recherche du meilleur patch source
+        best = find_best_patch(img_inpaint_lab, mask, C, (y, x))
+        if best is None:
+            continue
+
+        yy, xx = best
+
+        # Copie du patch source dans le patch cible
+        t_y1 = max(0, y-r); t_y2 = min(h, y+r+1)
+        t_x1 = max(0, x-r); t_x2 = min(w, x+r+1)
+        t_h = t_y2 - t_y1; t_w = t_x2 - t_x1
+        s_y1 = yy - t_h//2; s_y2 = yy + (t_h - t_h//2)
+        s_x1 = xx - t_w//2; s_x2 = xx + (t_w - t_w//2)
+
+        tgt_mask = mask[t_y1:t_y2, t_x1:t_x2]
+        src_patch_bgr = img_inpaint[s_y1:s_y2, s_x1:s_x2]
+        img_inpaint[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = src_patch_bgr[tgt_mask == 255]
+
+        src_patch_lab = img_inpaint_lab[s_y1:s_y2, s_x1:s_x2]
+        img_inpaint_lab[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = src_patch_lab[tgt_mask == 255]
+
+        # Mise à jour du masque et de la carte de confiance
+        mask[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = 0
+        C[t_y1:t_y2, t_x1:t_x2][tgt_mask == 255] = C_p_value
+
+        cv2.imshow("Inpainting en cours", resize_for_display(overlay_mask(img_inpaint, mask)))
+        cv2.waitKey(1)
+
+    cv2.destroyWindow("Inpainting en cours")
+    return img_inpaint.copy()
 
 
-display_result = resize_for_display(img)
-cv2.imshow("Resultat final", display_result)
+def select_mask(img):
+    points = []
+    img_display = img.copy()
 
-out_path = "img/temp.png"
-cv2.imwrite(out_path, img)
+    def select_polygon(event, x, y, flags, param):
+        nonlocal points, img_display # Chargement des variables de select_mask
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            if len(points) > 1:
+                cv2.line(img_display, points[-2], points[-1], (0, 255, 0), 2)
+            cv2.circle(img_display, (x, y), 1, (255, 0, 0), -1)
 
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    cv2.namedWindow("Selection")
+    cv2.setMouseCallback("Selection", select_polygon)
+
+    while True:
+        cv2.imshow("Selection", img_display)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 13: # Entrée = validation du masque
+            break
+        elif key == 27: # Échap = réinitialisation du masque
+            points = []
+            img_display = img.copy()
+
+    cv2.destroyWindow("Selection")
+
+    if len(points) < 3:
+        return np.zeros(img.shape[:2], dtype=np.uint8) # Masque vide
+
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [np.array(points)], 255)
+    return mask
+
+
+if __name__ == "__main__":
+    img_path = "img/Kanizsa_triangle.png"
+    img = cv2.imread(img_path)
+    if img is None:
+        raise SystemExit(f"Impossible de charger l'image: {img_path}")
+
+    img_working = img.copy()
+
+    print("\n Tracez le masque (Entrée pour valider, Échap pour réinitialiser) \n")
+    mask_initial = select_mask(img_working)
+
+    if np.all(mask_initial == 0):
+        print("Pas de zone masquée")
+        cv2.destroyAllWindows()
+        exit()
+        
+    # Boucle d'amélioration itérative sur la MÊME zone
+    iteration_count = 0
+    while True:
+        iteration_count += 1
+        print(f"Itération {iteration_count}")
+
+        # Réinitialisation des masques
+        mask_current = mask_initial.copy()
+        C = np.ones_like(mask_initial, dtype=np.float32)
+        C[mask_current == 255] = 0.0
+
+        # Boucle d'inpainting
+        img_result = run_inpainting(img_working.copy(), mask_current, C)
+
+        # Mise à jour de l'image de travail
+        img_working = img_result.copy()
+
+        cv2.imshow("Resultat", resize_for_display(img_working))
+        print("Appuyez sur 'q' pour quitter, ou sur une autre touche pour lancer une nouvelle itération.")
+
+        key = cv2.waitKey(0) & 0xFF
+
+        if key in (ord('q'), ord('Q')):
+            break
+
+    cv2.imwrite("img/result.png", img_working)
+    cv2.destroyAllWindows()
